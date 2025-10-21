@@ -10,49 +10,12 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Initialize bot
-const bot = new Telegraf(process.env.BOT_TOKEN || 'YOUR_BOT_TOKEN');
+const bot = new Telegraf(process.env.BOT_TOKEN);
 
 // Store user sessions
 const userSessions = new Map();
 
-// Free TTS Service using Google Translate (web version)
-async function generateSinhalaSpeech(text, voiceType = 'female') {
-  try {
-    // Google Translate TTS endpoint
-    const url = `https://translate.google.com/translate_tts`;
-    
-    const response = await axios.get(url, {
-      params: {
-        ie: 'UTF-8',
-        q: text,
-        tl: 'si', // Sinhala
-        total: '1',
-        idx: '0',
-        textlen: text.length,
-        client: 'tw-ob',
-        prev: 'input',
-        ttsspeed: voiceType === 'child' ? '0.9' : '1.0'
-      },
-      responseType: 'arraybuffer',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
-    
-    return Buffer.from(response.data);
-  } catch (error) {
-    console.log('Google TTS failed, using fallback...');
-    // Fallback: Create empty audio with correct duration
-    return generateSilentAudio(text.length * 0.1); // Approximate duration
-  }
-}
-
-function generateSilentAudio(durationSeconds) {
-  // This would create silent audio - in real implementation, use audio buffer
-  return Buffer.alloc(1000); // Placeholder
-}
-
-// Subtitle Parser
+// Simple SRT Parser
 function parseSRT(subtitleText) {
   const lines = subtitleText.split('\n');
   const subtitles = [];
@@ -61,25 +24,34 @@ function parseSRT(subtitleText) {
   for (const line of lines) {
     const trimmed = line.trim();
     
-    if (!trimmed) continue;
+    if (!trimmed) {
+      if (currentSub) {
+        subtitles.push(currentSub);
+        currentSub = null;
+      }
+      continue;
+    }
     
-    // Check if line is timestamp
+    // Check if line is timestamp (contains -->)
     if (trimmed.includes('-->')) {
       if (currentSub) {
         subtitles.push(currentSub);
       }
       
-      const [start, end] = trimmed.split(' --> ');
-      currentSub = {
-        startTime: parseTime(start),
-        endTime: parseTime(end),
-        text: ''
-      };
-    } else if (currentSub && !isNaN(trimmed)) {
-      // Skip index numbers
+      const parts = trimmed.split(' --> ');
+      if (parts.length === 2) {
+        currentSub = {
+          startTime: parseTime(parts[0]),
+          endTime: parseTime(parts[1]),
+          text: ''
+        };
+      }
+    } else if (!isNaN(trimmed) && currentSub === null) {
+      // This is a subtitle index number, ignore it
       continue;
     } else if (currentSub) {
-      currentSub.text += (currentSub.text ? ' ' : '') + trimmed;
+      // This is subtitle text
+      currentSub.text += (currentSub.text ? '\n' : '') + trimmed;
     }
   }
   
@@ -91,106 +63,173 @@ function parseSRT(subtitleText) {
 }
 
 function parseTime(timeStr) {
-  const [hours, minutes, secondsMs] = timeStr.split(':');
-  const [seconds, milliseconds] = secondsMs.split(',');
-  
-  return (
-    parseInt(hours) * 3600 +
-    parseInt(minutes) * 60 +
-    parseInt(seconds) +
-    parseInt(milliseconds) / 1000
-  );
+  try {
+    // Handle format: 00:00:01,100 or 00:00:01.100
+    const cleanTime = timeStr.replace(',', '.');
+    const parts = cleanTime.split(':');
+    
+    if (parts.length === 3) {
+      const hours = parseInt(parts[0]);
+      const minutes = parseInt(parts[1]);
+      const seconds = parseFloat(parts[2]);
+      
+      return hours * 3600 + minutes * 60 + seconds;
+    }
+  } catch (error) {
+    console.error('Error parsing time:', timeStr, error);
+  }
+  return 0;
+}
+
+// Free TTS Service using Google Translate
+async function generateSinhalaSpeech(text, voiceType = 'female') {
+  try {
+    // Google Translate TTS endpoint
+    const ttsUrl = 'https://translate.google.com/translate_tts';
+    
+    const response = await axios({
+      method: 'GET',
+      url: ttsUrl,
+      params: {
+        ie: 'UTF-8',
+        q: text,
+        tl: 'si', // Sinhala language code
+        total: '1',
+        idx: '0',
+        textlen: text.length,
+        client: 'tw-ob',
+        prev: 'input',
+        ttsspeed: voiceType === 'child' ? '0.8' : '1.0'
+      },
+      responseType: 'arraybuffer',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Referer': 'https://translate.google.com/',
+        'Accept': 'audio/mpeg'
+      }
+    });
+    
+    console.log(`Generated TTS for: ${text.substring(0, 50)}...`);
+    return Buffer.from(response.data);
+    
+  } catch (error) {
+    console.error('TTS Error:', error.message);
+    // Return empty buffer as fallback
+    return Buffer.alloc(0);
+  }
 }
 
 // Voice type detection for Sinhala
 function detectVoiceType(text) {
-  const sinhalaText = text;
+  // Simple heuristics based on text length and content
+  const cleanText = text.replace(/[^\u0D80-\u0DFF]/g, ''); // Keep only Sinhala characters
   
-  // Simple heuristics for voice type detection
-  if (sinhalaText.includes('?')) return 'child';
-  if (sinhalaText.length < 20) return 'child';
-  
-  // Check for feminine patterns (you can add more Sinhala-specific patterns)
-  const femininePatterns = [
-    'මම', 'මගේ', 'ඔබ', 'කියන්න', 'එපා', 'ආයුබෝවන්'
-  ];
-  
-  for (const pattern of femininePatterns) {
-    if (sinhalaText.includes(pattern)) {
-      return Math.random() > 0.5 ? 'female' : 'male';
-    }
+  if (cleanText.length < 15) {
+    return 'child';
   }
   
-  return 'male';
+  // Check for question marks or exclamation which might indicate child speech
+  if (text.includes('?') || text.includes('!')) {
+    return Math.random() > 0.7 ? 'child' : 'female';
+  }
+  
+  // Random distribution for demo - in production, use better logic
+  const rand = Math.random();
+  if (rand < 0.4) return 'female';
+  if (rand < 0.7) return 'male';
+  return 'child';
 }
 
-// Audio processing
-async function mixAudioSegments(audioSegments, outputPath, totalDuration) {
-  // Simplified audio mixing - in production, use proper audio concatenation
+// Get video duration
+function getVideoDuration(videoPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(videoPath, (err, metadata) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(metadata.format.duration || 60); // Default to 60 seconds if unknown
+      }
+    });
+  });
+}
+
+// Simple audio mixing - creates individual audio files and merges them
+async function createDubbedAudio(audioSegments, outputPath, totalDuration) {
+  const tempDir = path.dirname(outputPath);
   const tempFiles = [];
   
   try {
-    // Create silent base audio
-    const silentBase = path.join(path.dirname(outputPath), 'silent.wav');
+    // Create a silent base audio
+    const silentAudio = path.join(tempDir, 'silent.mp3');
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input('anullsrc=channel_layout=stereo:sample_rate=44100')
         .inputOptions([`-t ${totalDuration}`])
-        .output(silentBase)
+        .output(silentAudio)
         .on('end', resolve)
         .on('error', reject)
         .run();
     });
     
-    // Mix audio segments (simplified)
-    let command = ffmpeg(silentBase);
-    
+    // Create audio files for each segment
     for (let i = 0; i < audioSegments.length; i++) {
       const segment = audioSegments[i];
-      const tempFile = path.join(path.dirname(outputPath), `segment_${i}.mp3`);
+      if (segment.audio.length === 0) continue; // Skip empty audio
       
+      const tempFile = path.join(tempDir, `segment_${i}.mp3`);
       await fs.writeFile(tempFile, segment.audio);
       tempFiles.push(tempFile);
-      
-      command = command.input(tempFile)
-        .inputOptions([`-ss ${segment.start}`, `-t ${segment.end - segment.start}`]);
     }
     
-    // Complex filter for mixing
-    let filter = '';
-    for (let i = 0; i < audioSegments.length; i++) {
-      if (i > 0) filter += ';';
-      filter += `[${i + 1}:a]adelay=${audioSegments[i].start * 1000}|${audioSegments[i].start * 1000}[a${i}]`;
+    if (tempFiles.length === 0) {
+      // If no audio segments, just copy silent audio
+      await fs.copyFile(silentAudio, outputPath);
+      return;
     }
     
-    filter += ';' + Array.from({length: audioSegments.length}, (_, i) => `[a${i}]`).join('') + 
-              `amix=inputs=${audioSegments.length + 1}:duration=longest[audio]`;
+    // Build ffmpeg command for mixing
+    let command = ffmpeg(silentAudio);
+    
+    // Add all segment files as inputs
+    tempFiles.forEach(file => {
+      command = command.input(file);
+    });
+    
+    // Create complex filter for mixing
+    let filterComplex = '';
+    const inputs = ['0:a'];
+    
+    for (let i = 0; i < tempFiles.length; i++) {
+      const segment = audioSegments[i];
+      filterComplex += `[${i + 1}:a]adelay=${segment.start * 1000}|${segment.start * 1000}[a${i}];`;
+      inputs.push(`[a${i}]`);
+    }
+    
+    filterComplex += `${inputs.join('')}amix=inputs=${inputs.length}:duration=longest[audio]`;
     
     await new Promise((resolve, reject) => {
-      command.complexFilter(filter, 'audio')
+      command
+        .complexFilter(filterComplex, 'audio')
+        .outputOptions(['-map', '[audio]'])
         .output(outputPath)
         .on('end', resolve)
         .on('error', reject)
         .run();
     });
     
-    return outputPath;
+  } catch (error) {
+    console.error('Audio mixing error:', error);
+    throw error;
   } finally {
     // Cleanup temp files
-    for (const tempFile of tempFiles) {
-      try { await fs.unlink(tempFile); } catch {}
+    for (const file of [...tempFiles, path.join(tempDir, 'silent.mp3')]) {
+      try {
+        await fs.unlink(file);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
     }
-    try { await fs.unlink(path.join(path.dirname(outputPath), 'silent.wav')); } catch {}
   }
-}
-
-function getVideoDuration(videoPath) {
-  return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(videoPath, (err, metadata) => {
-      if (err) reject(err);
-      else resolve(metadata.format.duration);
-    });
-  });
 }
 
 // Bot Commands
@@ -201,12 +240,12 @@ bot.start((ctx) => {
 
 භාවිතය:
 1. මට වීඩියෝ එකක් එවන්න
-2. සිංහල උපසිරැසි ගොනුව එවන්න (.srt හෝ .vtt)
+2. සිංහල උපසිරැසි ගොනුව එවන්න (.srt)
 3. මම ස්වයංක්‍රීයව හඬකැවූ වීඩියෝව එවන්නම්
 
 විශේෂාංග:
 • ස්වයංක්‍රීය හඬ තෝරාගැනීම (දරු, ස්ත්‍රී, පුරුෂ)
-• ස්වභාවික සිංහල උච්චාරණය
+• සිංහල උච්චාරණය
 • ඉක්මන් පිරිසැකසුම
 
 වීඩියෝවක් එවීමෙන් ආරම්භ කරන්න!`);
@@ -215,7 +254,7 @@ bot.start((ctx) => {
 bot.help((ctx) => {
   ctx.reply(`උදව්:
 
-1. වීඩියෝ එවන්න (MP4, MOV, AVI)
+1. වීඩියෝ එවන්න (MP4, MOV)
 2. සිංහල උපසිරැසි ගොනුව එවන්න (.srt)
 3. රැඳී සිටින්න - මම හඬකැවූ වීඩියෝව එවන්නම්
 
@@ -230,16 +269,17 @@ bot.on('video', async (ctx) => {
     const file = await ctx.telegram.getFile(fileId);
     const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
     
-    if (!userSessions.has(userId)) {
-      userSessions.set(userId, {});
-    }
-    userSessions.get(userId).videoUrl = fileUrl;
-    userSessions.get(userId).videoFileId = fileId;
+    // Initialize user session
+    userSessions.set(userId, {
+      videoUrl: fileUrl,
+      videoFileId: fileId,
+      timestamp: Date.now()
+    });
     
-    await ctx.reply('✅ වීඩියෝව ලැබුණා! දැන් සිංහල උපසිරැසි ගොනුව එවන්න (.srt හෝ .vtt)');
+    await ctx.reply('✅ වීඩියෝව ලැබුණා! දැන් සිංහල උපසිරැසි ගොනුව එවන්න (.srt)');
     
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error handling video:', error);
     await ctx.reply('❌ දෝෂයක්! කරුණාකර නැවත උත්සාහ කරන්න.');
   }
 });
@@ -250,8 +290,9 @@ bot.on('document', async (ctx) => {
     const fileName = document.file_name.toLowerCase();
     const userId = ctx.from.id;
     
-    if (!fileName.endsWith('.srt') && !fileName.endsWith('.vtt')) {
-      await ctx.reply('❌ කරුණාකර නිවැරදි උපසිරැසි ගොනුව එවන්න (.srt හෝ .vtt)');
+    // Check if it's a subtitle file
+    if (!fileName.endsWith('.srt')) {
+      await ctx.reply('❌ කරුණාකර .srt උපසිරැසි ගොනුව එවන්න');
       return;
     }
     
@@ -261,12 +302,23 @@ bot.on('document', async (ctx) => {
       return;
     }
     
+    // Clean old sessions (1 hour old)
+    const now = Date.now();
+    for (const [id, session] of userSessions.entries()) {
+      if (now - session.timestamp > 3600000) {
+        userSessions.delete(id);
+      }
+    }
+    
     const file = await ctx.telegram.getFile(document.file_id);
     const subtitleUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
     
+    // Update session
     userSession.subtitleUrl = subtitleUrl;
+    userSession.timestamp = Date.now();
     
-    const processingMsg = await ctx.reply('🔄 ඔබගේ වීඩියෝව සකසන්නේ...\n\n• ගොනු බාගත කිරීම\n• උපසිරැසි විග්‍රහ කිරීම\n• සිංහල හඬ නිපදවීම\n• ශබ්දය සම්බන්ධ කිරීම\n\nකරුණාකර රැඳී සිටින්න...');
+    // Send processing message
+    const processingMsg = await ctx.reply('🔄 ඔබගේ වීඩියෝව සකසන්නේ...\n\n• ගොනු බාගත කිරීම\n• උපසිරැසි විග්‍රහ කිරීම\n• සිංහල හඬ නිපදවීම\n• ශබ්දය සම්බන්ධ කිරීම\n\nකරුණාකර රැඳී සිටින්න... (මිනිත්තු 2-5 තිබේ)');
 
     // Process dubbing
     const tempDir = path.join(tmpdir(), `dub-${userId}-${Date.now()}`);
@@ -275,22 +327,43 @@ bot.on('document', async (ctx) => {
     try {
       const videoPath = path.join(tempDir, 'original.mp4');
       const subtitlePath = path.join(tempDir, 'subtitle.srt');
+      const dubbedAudioPath = path.join(tempDir, 'dubbed_audio.mp3');
       const outputPath = path.join(tempDir, 'dubbed_video.mp4');
 
       // Download files
-      const videoResponse = await axios.get(userSession.videoUrl, { responseType: 'arraybuffer' });
+      await ctx.reply('📥 ගොනු බාගත කිරීම...');
+      
+      const videoResponse = await axios({
+        method: 'GET',
+        url: userSession.videoUrl,
+        responseType: 'arraybuffer',
+        timeout: 60000
+      });
       await fs.writeFile(videoPath, videoResponse.data);
 
-      const subtitleResponse = await axios.get(subtitleUrl, { responseType: 'text' });
+      const subtitleResponse = await axios({
+        method: 'GET',
+        url: subtitleUrl,
+        responseType: 'text',
+        timeout: 30000
+      });
       await fs.writeFile(subtitlePath, subtitleResponse.data);
 
       // Parse subtitle
+      await ctx.reply('📝 උපසිරැසි විග්‍රහ කිරීම...');
       const subtitleContent = await fs.readFile(subtitlePath, 'utf8');
       const subtitles = parseSRT(subtitleContent);
+      
+      if (subtitles.length === 0) {
+        throw new Error('No subtitles found in the file');
+      }
+
+      await ctx.reply(`🔊 ${subtitles.length} උපසිරැසි සඳහා හඬ නිපදවීම...`);
 
       // Generate audio segments
       const audioSegments = [];
-      for (const sub of subtitles) {
+      for (let i = 0; i < Math.min(subtitles.length, 50); i++) { // Limit to 50 segments for demo
+        const sub = subtitles[i];
         const voiceType = detectVoiceType(sub.text);
         const audioBuffer = await generateSinhalaSpeech(sub.text, voiceType);
         
@@ -298,18 +371,22 @@ bot.on('document', async (ctx) => {
           audio: audioBuffer,
           start: sub.startTime,
           end: sub.endTime,
-          text: sub.text
+          text: sub.text.substring(0, 100) // Truncate for logging
         });
+        
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
 
       // Get video duration
       const duration = await getVideoDuration(videoPath);
 
       // Create dubbed audio
-      const dubbedAudioPath = path.join(tempDir, 'dubbed_audio.wav');
-      await mixAudioSegments(audioSegments, dubbedAudioPath, duration);
+      await ctx.reply('🎵 ශබ්දය මිශ්‍ර කිරීම...');
+      await createDubbedAudio(audioSegments, dubbedAudioPath, duration);
 
       // Replace audio in video
+      await ctx.reply('🎬 අවසාන වීඩියෝව සෑදීම...');
       await new Promise((resolve, reject) => {
         ffmpeg(videoPath)
           .input(dubbedAudioPath)
@@ -326,50 +403,63 @@ bot.on('document', async (ctx) => {
           .run();
       });
 
+      // Check if output file exists and has reasonable size
+      const stats = await fs.stat(outputPath);
+      if (stats.size < 1024) {
+        throw new Error('Output file too small');
+      }
+
       // Send the dubbed video
       await ctx.reply('✅ හඬකැවීම සම්පුර්ණ! වීඩියෝව එවන්නේ...');
 
       await ctx.replyWithVideo(
         { source: outputPath },
         {
-          caption: `🎬 ඔබගේ සිංහල හඬකැවූ වීඩියෝව!\n\nස්වයංක්‍රීයව හඬකැවුණු:\n• 👦 දරු චරිත\n• 👩 ස්ත්‍රී චරිත  \n• 👨 පුරුෂ චරිත\n\nභුක්ති විඳින්න! 🍿`
+          caption: `🎬 ඔබගේ සිංහල හඬකැවූ වීඩියෝව!\n\nස්වයංක්‍රීයව හඬකැවුණු ${audioSegments.length} උපසිරැසි\n\nභුක්ති විඳින්න! 🍿`
         }
       );
 
-      // Cleanup
-      userSessions.delete(userId);
-      
     } catch (error) {
       console.error('Processing error:', error);
-      await ctx.reply('❌ සැකසීමේ දෝෂයක්. කරුණාකර උපසිරැසි ගොනුව පරීක්ෂා කරන්න.');
+      await ctx.reply(`❌ සැකසීමේ දෝෂය: ${error.message}\nකරුණාකර නැවත උත්සාහ කරන්න.`);
     } finally {
-      // Cleanup temp files
+      // Cleanup temp directory
       try {
         await fs.rm(tempDir, { recursive: true, force: true });
       } catch (cleanupError) {
         console.error('Cleanup error:', cleanupError);
       }
+      
+      // Cleanup session
+      userSessions.delete(userId);
     }
     
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error processing document:', error);
     await ctx.reply('❌ දෝෂයක්! කරුණාකර නැවත උත්සාහ කරන්න.');
   }
 });
 
 bot.on('message', (ctx) => {
-  ctx.reply('කරුණාකර මට වීඩියෝ ගොනුවක් එවන්න, පසුව සිංහල උපසිරැසි ගොනුව.');
+  ctx.reply('කරුණාකර මට වීඩියෝ ගොනුවක් එවන්න, පසුව සිංහල උපසිරැසි ගොනුව (.srt).');
 });
 
-// Webhook setup for Vercel
-app.use(express.json());
-app.use(bot.webhookCallback('/webhook'));
+// Error handling
+bot.catch((err, ctx) => {
+  console.error('Bot error:', err);
+  ctx.reply('❌ අනපේක්ෂිත දෝෂයක්. කරුණාකර නැවත උත්සාහ කරන්න.');
+});
 
+// Express setup
+app.use(express.json());
+
+// Health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
     status: 'Bot is running!',
     service: 'Sinhala Video Dubbing Bot',
-    usage: 'Use Telegram bot @YourBotName'
+    users: userSessions.size,
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -377,16 +467,26 @@ app.get('/health', (req, res) => {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
-// Start server
-app.listen(PORT, async () => {
-  console.log(`🚀 Bot server running on port ${PORT}`);
-  
-  // Set webhook for production
-  if (process.env.VERCEL_URL) {
-    const webhookUrl = `https://${process.env.VERCEL_URL}/webhook`;
-    await bot.telegram.setWebhook(webhookUrl);
-    console.log(`Webhook set to: ${webhookUrl}`);
-  }
+// Webhook endpoint
+app.post('/webhook', (req, res) => {
+  bot.handleUpdate(req.body);
+  res.sendStatus(200);
 });
 
-module.exports = app;
+// Start server
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`🚀 Bot server running on port ${PORT}`);
+    console.log(`🤖 Bot is running in polling mode`);
+  });
+  
+  // Start polling in development
+  bot.launch();
+} else {
+  // For Vercel, export the app
+  module.exports = app;
+}
+
+// Enable graceful stop
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
