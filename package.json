@@ -1,0 +1,20 @@
+{
+  "name": "sinhala-dub-bot",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "axios": "^1.5.0",
+    "fluent-ffmpeg": "^2.1.2",
+    "ffmpeg-static": "^5.1.0",
+    "srt-parser-2": "^1.3.0",
+    "node-webvtt": "^1.3.4",
+    "multer": "^1.4.5-lts.1",
+    "form-data": "^4.0.0",
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  }
+}
